@@ -1,0 +1,7 @@
+{
+  "name": "Colorful Weather App",
+  "description": "A real-time weather app with location detection, forecasts, and animations.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
