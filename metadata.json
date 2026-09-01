@@ -1,0 +1,6 @@
+{
+  "name": "WeatherSphere - Real-Time Weather App",
+  "description": "Production-quality real-time weather mobile application with live GPS forecasting, interactive radar map, hourly & 7-day forecasts, severe alerts, favorites, and PWA capabilities.",
+  "requestFramePermissions": ["geolocation", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
