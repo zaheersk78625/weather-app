@@ -49,14 +49,35 @@ const defaultLocation: LocationInfo = {
   source: 'default',
 };
 
+// Fast local storage helpers for instant zero-latency startup
+const getCachedLocation = (): LocationInfo => {
+  try {
+    const raw = localStorage.getItem('weathersphere_last_location');
+    if (raw) return JSON.parse(raw);
+  } catch {}
+  return defaultLocation;
+};
+
+const getCachedWeather = (): WeatherData | null => {
+  try {
+    const raw = localStorage.getItem('weathersphere_cached_weather');
+    if (raw) return JSON.parse(raw);
+  } catch {}
+  return null;
+};
+
 const WeatherContext = createContext<WeatherContextType | undefined>(undefined);
 
 export const WeatherProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { user } = useAuth();
   const [activeTab, setActiveTab] = useState<'home' | 'forecast' | 'map' | 'favorites' | 'settings'>('home');
-  const [location, setLocation] = useState<LocationInfo | null>(null);
-  const [weather, setWeather] = useState<WeatherData | null>(null);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
+  
+  const initialLoc = getCachedLocation();
+  const initialWeather = getCachedWeather();
+
+  const [location, setLocation] = useState<LocationInfo>(initialLoc);
+  const [weather, setWeather] = useState<WeatherData | null>(initialWeather);
+  const [isLoading, setIsLoading] = useState<boolean>(!initialWeather);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [isDetectingLocation, setIsDetectingLocation] = useState<boolean>(false);
   const [locationMessage, setLocationMessage] = useState<string | null>(null);
@@ -68,7 +89,7 @@ export const WeatherProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const refreshTimerRef = useRef<NodeJS.Timeout | null>(null);
   const messageTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  const showLocationToast = (msg: string, duration = 4000) => {
+  const showLocationToast = (msg: string, duration = 3500) => {
     setLocationMessage(msg);
     if (messageTimeoutRef.current) clearTimeout(messageTimeoutRef.current);
     messageTimeoutRef.current = setTimeout(() => {
@@ -76,7 +97,7 @@ export const WeatherProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }, duration);
   };
 
-  // Load Settings & Favorites
+  // Load Settings & Favorites in background
   useEffect(() => {
     async function loadData() {
       try {
@@ -105,40 +126,47 @@ export const WeatherProvider: React.FC<{ children: React.ReactNode }> = ({ child
     try {
       const data = await weatherApi.getWeatherByCoords(lat, lon);
       setWeather(data);
+      try {
+        localStorage.setItem('weathersphere_cached_weather', JSON.stringify(data));
+      } catch {}
     } catch (err: any) {
       console.error('Fetch weather error:', err);
-      setError(err.message || 'Unable to fetch weather. Check your internet connection and try again.');
+      if (!weather) {
+        setError(err.message || 'Unable to fetch weather. Check your internet connection and try again.');
+      }
     } finally {
       setIsLoading(false);
       setIsRefreshing(false);
     }
-  }, []);
+  }, [weather]);
 
-  // Multi-tier Auto Detect Location (Tier 1: GPS Browser API, Tier 2: IP-based Geolocation, Tier 3: Default)
+  // Multi-tier Auto Detect Location (Tier 1: Fast Browser GPS, Tier 2: Fast Network IP, Tier 3: Default)
   const autoDetectLocation = useCallback(async (showToasts = true) => {
     setIsDetectingLocation(true);
     setError(null);
     setPermissionDenied(false);
 
     if (showToasts) {
-      showLocationToast('Detecting your location via GPS & Network...', 6000);
+      showLocationToast('Auto-detecting your location...', 4000);
     }
 
     const tryIpFallback = async (reason = '') => {
       try {
-        if (showToasts) {
-          showLocationToast('Detecting via Network IP location...', 3000);
-        }
         const ipLoc = await weatherApi.detectIpLocation();
         setLocation(ipLoc);
+        try {
+          localStorage.setItem('weathersphere_last_location', JSON.stringify(ipLoc));
+        } catch {}
         if (showToasts) {
-          showLocationToast(`📍 Auto-detected: ${ipLoc.city}${ipLoc.country ? ', ' + ipLoc.country : ''} (Network IP)`, 4000);
+          showLocationToast(`📍 Detected: ${ipLoc.city}${ipLoc.country ? ', ' + ipLoc.country : ''} (Network IP)`, 3500);
         }
         await fetchWeather(ipLoc.latitude, ipLoc.longitude);
       } catch (ipErr) {
         console.warn('IP location detection fallback failed:', ipErr);
-        setLocation(defaultLocation);
-        await fetchWeather(defaultLocation.latitude, defaultLocation.longitude);
+        if (!location) {
+          setLocation(defaultLocation);
+          await fetchWeather(defaultLocation.latitude, defaultLocation.longitude);
+        }
         if (showToasts && reason) {
           setError(reason);
         }
@@ -155,14 +183,14 @@ export const WeatherProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     let resolved = false;
 
-    // Set a safety timeout for GPS (5.5 seconds) before automatically escalating to IP Geolocation
+    // Safety timeout for fast response (2.5 seconds) before automatically resolving via IP
     const gpsTimeout = setTimeout(() => {
       if (!resolved) {
         resolved = true;
-        console.log('GPS timed out, seamlessly switching to IP geolocation auto-detection...');
+        console.log('GPS timed out, seamlessly resolving via fast IP geolocation...');
         tryIpFallback();
       }
-    }, 5500);
+    }, 2500);
 
     navigator.geolocation.getCurrentPosition(
       async (position) => {
@@ -185,8 +213,11 @@ export const WeatherProvider: React.FC<{ children: React.ReactNode }> = ({ child
             source: 'gps',
           };
           setLocation(newLoc);
+          try {
+            localStorage.setItem('weathersphere_last_location', JSON.stringify(newLoc));
+          } catch {}
           if (showToasts) {
-            showLocationToast(`📍 Auto-detected: ${newLoc.city}${newLoc.country ? ', ' + newLoc.country : ''} (GPS)`, 4000);
+            showLocationToast(`📍 Detected: ${newLoc.city}${newLoc.country ? ', ' + newLoc.country : ''} (GPS)`, 3500);
           }
           await fetchWeather(latitude, longitude);
         } catch (e) {
@@ -200,6 +231,9 @@ export const WeatherProvider: React.FC<{ children: React.ReactNode }> = ({ child
             source: 'gps',
           };
           setLocation(fallbackLoc);
+          try {
+            localStorage.setItem('weathersphere_last_location', JSON.stringify(fallbackLoc));
+          } catch {}
           await fetchWeather(latitude, longitude);
         } finally {
           setIsDetectingLocation(false);
@@ -217,19 +251,22 @@ export const WeatherProvider: React.FC<{ children: React.ReactNode }> = ({ child
         // Seamlessly auto-detect through IP Geolocation
         await tryIpFallback();
       },
-      { timeout: 5000, enableHighAccuracy: true, maximumAge: 30000 }
+      { timeout: 2500, enableHighAccuracy: false, maximumAge: 600000 }
     );
-  }, [fetchWeather]);
+  }, [fetchWeather, location]);
 
   // Request GPS Location alias
   const requestGpsLocation = useCallback(async () => {
     await autoDetectLocation(true);
   }, [autoDetectLocation]);
 
-  // Initial Boot - Auto Geolocation detection or default location
+  // Initial Boot - Fast instant fetch + background auto-detection
   useEffect(() => {
+    const loc = getCachedLocation();
+    fetchWeather(loc.latitude, loc.longitude);
+    // Background auto-detection without blocking UI
     autoDetectLocation(false);
-  }, [autoDetectLocation]);
+  }, []);
 
   // Periodic Auto-refresh Timer
   useEffect(() => {

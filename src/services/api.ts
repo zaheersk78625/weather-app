@@ -47,62 +47,114 @@ export const weatherApi = {
     }
   },
 
-  // Reverse geocode lat/lon into city details
+  // Reverse geocode lat/lon into city details with fast multi-source fallback
   async reverseGeocode(lat: number, lon: number): Promise<{
     city: string;
     state?: string;
     country?: string;
     displayName: string;
   }> {
+    // 1. Try server endpoint first with 2s timeout
     try {
-      const res = await fetch(`${API_BASE}/weather/location?lat=${lat}&lon=${lon}`);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 2000);
+      const res = await fetch(`${API_BASE}/weather/location?lat=${lat}&lon=${lon}`, { signal: controller.signal });
+      clearTimeout(timeout);
       if (res.ok) {
-        return await res.json();
+        const data = await res.json();
+        if (data.city && data.city !== 'Current Location') {
+          return data;
+        }
       }
     } catch (e) {
-      console.warn('Reverse geocoding error:', e);
+      // Continue to direct client fallback
     }
+
+    // 2. Direct browser BigDataCloud reverse geocode (super fast <100ms)
+    try {
+      const bdcController = new AbortController();
+      const bdcTimeout = setTimeout(() => bdcController.abort(), 1500);
+      const bdcRes = await fetch(
+        `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lon}&localityLanguage=en`,
+        { signal: bdcController.signal }
+      );
+      clearTimeout(bdcTimeout);
+      if (bdcRes.ok) {
+        const data = await bdcRes.json();
+        const city = data.city || data.locality || data.principalSubdivision || 'Current Location';
+        const state = data.principalSubdivision || '';
+        const country = data.countryName || '';
+        return {
+          city,
+          state,
+          country,
+          displayName: `${city}${state ? ', ' + state : ''}${country ? ', ' + country : ''}`,
+        };
+      }
+    } catch (bdcErr) {
+      // fallback
+    }
+
     return {
       city: 'Current Location',
       displayName: `GPS: ${lat.toFixed(2)}°, ${lon.toFixed(2)}°`,
     };
   },
 
-  // Auto-detect location via IP Geolocation
+  // Auto-detect location via IP Geolocation (Fast multi-source parallel race)
   async detectIpLocation(): Promise<LocationInfo> {
-    try {
-      const res = await fetch(`${API_BASE}/weather/ip-location`);
-      if (res.ok) {
-        return await res.json();
-      }
-    } catch (e) {
-      console.warn('Server IP location error, trying client fallback:', e);
-    }
+    const fetchDirectIpwho = async (): Promise<LocationInfo | null> => {
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 2000);
+        const res = await fetch('https://ipwho.is/', { signal: ctrl.signal });
+        clearTimeout(t);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.success !== false && data.latitude && data.longitude) {
+            const city = data.city || data.region || 'Current Location';
+            const state = data.region || '';
+            const country = data.country || '';
+            return {
+              city,
+              state,
+              country,
+              displayName: `${city}${state ? ', ' + state : ''}${country ? ', ' + country : ''}`,
+              latitude: Number(data.latitude),
+              longitude: Number(data.longitude),
+              isGps: false,
+              isIp: true,
+              source: 'ip'
+            };
+          }
+        }
+      } catch {}
+      return null;
+    };
 
-    // Direct browser fallback to public IP geo
+    const fetchServerIp = async (): Promise<LocationInfo | null> => {
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 2000);
+        const res = await fetch(`${API_BASE}/weather/ip-location`, { signal: ctrl.signal });
+        clearTimeout(t);
+        if (res.ok) {
+          return await res.json();
+        }
+      } catch {}
+      return null;
+    };
+
     try {
-      const directRes = await fetch('https://ipwho.is/');
-      if (directRes.ok) {
-        const data = await directRes.json();
-        if (data.success !== false && data.latitude && data.longitude) {
-          const city = data.city || data.region || 'Current Location';
-          const state = data.region || '';
-          const country = data.country || '';
-          return {
-            city,
-            state,
-            country,
-            displayName: `${city}${state ? ', ' + state : ''}${country ? ', ' + country : ''}`,
-            latitude: Number(data.latitude),
-            longitude: Number(data.longitude),
-            isGps: false,
-            isIp: true,
-            source: 'ip'
-          };
+      // Race direct browser IP and server IP for maximum speed (<250ms)
+      const results = await Promise.allSettled([fetchDirectIpwho(), fetchServerIp()]);
+      for (const result of results) {
+        if (result.status === 'fulfilled' && result.value && result.value.city) {
+          return result.value;
         }
       }
-    } catch (directErr) {
-      console.warn('Direct IP geolocation failed:', directErr);
+    } catch (e) {
+      console.warn('IP auto-detection error:', e);
     }
 
     return {

@@ -147,7 +147,7 @@ app.get('/api/health', (req: Request, res: Response) => {
   res.json({ status: 'ok', time: new Date().toISOString(), service: 'WeatherSphere Express Server' });
 });
 
-// Search cities
+// Search cities with fast 3s timeout
 app.get('/api/weather/search', async (req: Request, res: Response) => {
   try {
     const q = (req.query.q as string || '').trim();
@@ -155,9 +155,15 @@ app.get('/api/weather/search', async (req: Request, res: Response) => {
       return res.json([]);
     }
 
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+
     const response = await fetch(
-      `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=10&language=en&format=json`
+      `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=10&language=en&format=json`,
+      { signal: controller.signal }
     );
+    clearTimeout(timeout);
+
     if (!response.ok) {
       return res.status(response.status).json({ error: 'Failed to search location' });
     }
@@ -181,7 +187,7 @@ app.get('/api/weather/search', async (req: Request, res: Response) => {
   }
 });
 
-// Reverse geocode
+// Fast Reverse Geocode (BigDataCloud + OpenStreetMap fallback with strict timeouts)
 app.get('/api/weather/location', async (req: Request, res: Response) => {
   try {
     const lat = parseFloat(req.query.lat as string);
@@ -191,11 +197,49 @@ app.get('/api/weather/location', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Valid lat and lon are required' });
     }
 
+    // Try BigDataCloud (blazing fast, ~80ms response)
     try {
+      const bdcController = new AbortController();
+      const bdcTimeout = setTimeout(() => bdcController.abort(), 1800);
+      const bdcRes = await fetch(
+        `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lon}&localityLanguage=en`,
+        { signal: bdcController.signal }
+      );
+      clearTimeout(bdcTimeout);
+
+      if (bdcRes.ok) {
+        const data = await bdcRes.json();
+        const city = data.city || data.locality || data.principalSubdivision || 'Current Location';
+        const state = data.principalSubdivision || '';
+        const country = data.countryName || '';
+        if (city && city !== 'Current Location') {
+          return res.json({
+            city,
+            state,
+            country,
+            displayName: `${city}${state ? ', ' + state : ''}${country ? ', ' + country : ''}`,
+            latitude: lat,
+            longitude: lon
+          });
+        }
+      }
+    } catch (bdcErr) {
+      // Continue to Nominatim fallback
+    }
+
+    // Nominatim fallback with 2s timeout
+    try {
+      const nomController = new AbortController();
+      const nomTimeout = setTimeout(() => nomController.abort(), 2000);
       const response = await fetch(
         `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=json&zoom=10`,
-        { headers: { 'User-Agent': 'WeatherSphere-App/1.0 (contact: info@weathersphere.internal)' } }
+        {
+          headers: { 'User-Agent': 'WeatherSphere-App/1.0 (contact: info@weathersphere.internal)' },
+          signal: nomController.signal
+        }
       );
+      clearTimeout(nomTimeout);
+
       if (response.ok) {
         const data = await response.json();
         const address = data.address || {};
@@ -228,19 +272,26 @@ app.get('/api/weather/location', async (req: Request, res: Response) => {
   }
 });
 
-// Auto-detect location via IP Geolocation
+// Auto-detect location via fast IP Geolocation
 app.get('/api/weather/ip-location', async (req: Request, res: Response) => {
   try {
     const forwarded = req.headers['x-forwarded-for'];
     const clientIp = typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : req.socket.remoteAddress;
 
-    // Try ipwho.is service
+    // Fast resolution using ipwho.is with 1.8s timeout
     try {
       const ipQuery = clientIp && !clientIp.startsWith('127.') && !clientIp.startsWith('10.') && !clientIp.startsWith('192.168.') && clientIp !== '::1'
         ? `https://ipwho.is/${clientIp}`
         : 'https://ipwho.is/';
 
-      const ipRes = await fetch(ipQuery, { headers: { 'User-Agent': 'WeatherSphere-App/1.0' } });
+      const ipController = new AbortController();
+      const ipTimeout = setTimeout(() => ipController.abort(), 1800);
+      const ipRes = await fetch(ipQuery, {
+        headers: { 'User-Agent': 'WeatherSphere-App/1.0' },
+        signal: ipController.signal
+      });
+      clearTimeout(ipTimeout);
+
       if (ipRes.ok) {
         const data = await ipRes.json();
         if (data.success !== false && data.latitude && data.longitude) {
@@ -261,12 +312,19 @@ app.get('/api/weather/ip-location', async (req: Request, res: Response) => {
         }
       }
     } catch (err) {
-      console.warn('ipwho.is failed, trying fallback:', err);
+      // Continue to fallback
     }
 
-    // Secondary fallback: ipapi.co
+    // Secondary fallback: ipapi.co with 1.8s timeout
     try {
-      const ipApiRes = await fetch('https://ipapi.co/json/', { headers: { 'User-Agent': 'WeatherSphere-App/1.0' } });
+      const ipApiController = new AbortController();
+      const ipApiTimeout = setTimeout(() => ipApiController.abort(), 1800);
+      const ipApiRes = await fetch('https://ipapi.co/json/', {
+        headers: { 'User-Agent': 'WeatherSphere-App/1.0' },
+        signal: ipApiController.signal
+      });
+      clearTimeout(ipApiTimeout);
+
       if (ipApiRes.ok) {
         const data = await ipApiRes.json();
         if (data.latitude && data.longitude) {
@@ -287,10 +345,10 @@ app.get('/api/weather/ip-location', async (req: Request, res: Response) => {
         }
       }
     } catch (err) {
-      console.warn('ipapi.co failed:', err);
+      // fallback
     }
 
-    // Default fallback if all IP services fail
+    // Instant default fallback
     return res.json({
       city: 'Hyderabad',
       state: 'Telangana',
