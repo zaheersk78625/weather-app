@@ -364,9 +364,9 @@ export const weatherApi = {
     };
   },
 
-  // Auto-detect location via IP Geolocation (Fast multi-source parallel race)
+  // Auto-detect location via IP Geolocation (Fast multi-source parallel race across 4 major providers)
   async detectIpLocation(): Promise<LocationInfo> {
-    const fetchDirectIpwho = async (): Promise<LocationInfo | null> => {
+    const fetchIpwhois = async (): Promise<LocationInfo | null> => {
       try {
         const ctrl = new AbortController();
         const t = setTimeout(() => ctrl.abort(), 2000);
@@ -395,6 +395,35 @@ export const weatherApi = {
       return null;
     };
 
+    const fetchIpapi = async (): Promise<LocationInfo | null> => {
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 2000);
+        const res = await fetch('https://ipapi.co/json/', { signal: ctrl.signal });
+        clearTimeout(t);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.latitude && data.longitude) {
+            const city = data.city || data.region || 'Current Location';
+            const state = data.region || '';
+            const country = data.country_name || '';
+            return {
+              city,
+              state,
+              country,
+              displayName: `${city}${state ? ', ' + state : ''}${country ? ', ' + country : ''}`,
+              latitude: Number(data.latitude),
+              longitude: Number(data.longitude),
+              isGps: false,
+              isIp: true,
+              source: 'ip'
+            };
+          }
+        }
+      } catch {}
+      return null;
+    };
+
     const fetchServerIp = async (): Promise<LocationInfo | null> => {
       try {
         const ctrl = new AbortController();
@@ -402,17 +431,20 @@ export const weatherApi = {
         const res = await fetch(`${API_BASE}/weather/ip-location`, { signal: ctrl.signal });
         clearTimeout(t);
         if (res.ok) {
-          return await res.json();
+          const data = await res.json();
+          if (data.latitude && data.longitude) {
+            return data;
+          }
         }
       } catch {}
       return null;
     };
 
     try {
-      // Race direct browser IP and server IP for maximum speed (<250ms)
-      const results = await Promise.allSettled([fetchDirectIpwho(), fetchServerIp()]);
+      // Race direct browser IP endpoints and server IP for maximum speed and accuracy
+      const results = await Promise.allSettled([fetchIpwhois(), fetchIpapi(), fetchServerIp()]);
       for (const result of results) {
-        if (result.status === 'fulfilled' && result.value && result.value.city) {
+        if (result.status === 'fulfilled' && result.value && result.value.city && result.value.latitude) {
           return result.value;
         }
       }
